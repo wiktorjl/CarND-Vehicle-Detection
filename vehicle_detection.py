@@ -1,45 +1,23 @@
-from sklearn import svm
-import cv2
-import matplotlib.pyplot as plt
-import numpy as np
-import cv2
-import matplotlib.pyplot as plt
-import matplotlib.image as mpimg
-from sklearn.preprocessing import StandardScaler
+import pickle
 import glob
 import pickle
-from skimage.feature import hog
-import matplotlib.image as mpimg
-import matplotlib.pyplot as plt
-import numpy as np
-import cv2
-import glob
+import sys
 import time
-from sklearn.svm import LinearSVC
-from sklearn.preprocessing import StandardScaler
+
+import cv2
+import numpy as np
+from moviepy.editor import VideoFileClip
+from scipy.ndimage.measurements import label
 from skimage.feature import hog
 from sklearn.model_selection import train_test_split
-from scipy.ndimage.measurements import label
-from moviepy.editor import VideoFileClip
-import sys
-import math
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import LinearSVC
 
-# PARAMETERS
-# color_space = 'YUV'
-# orient = 11
-# pix_per_cell = 16
-# cell_per_block = 2
-# hog_channel = 'ALL'
-# spatial_size = (32, 32)
-# hist_bins = 32
-# spatial_feat = False
-# hist_feat = False
-# hog_feat = True
-
+from demo import *
 
 config = {
-    "color_space": 'RGB',
-    "orient": 9,
+    "color_space": 'YUV',
+    "orient": 11,
     "pix_per_cell": 8,
     "cell_per_block": 2,
     "hog_channel": 'ALL',
@@ -233,10 +211,13 @@ def search_windows(img, windows, clf, scaler, color_space='YCrCb',
         # print("XXX ", np.array(features).reshape(1, -1).shape)
         test_features = scaler.transform(np.array(features).reshape(1, -1))
         # 6) Predict using your classifier
-        prediction = clf.predict(test_features)
+        # prediction = clf.predict(test_features)
+        decision = clf.decision_function(test_features)
+        # prediction = clf.predict_proba(test_features)
         # 7) If positive (prediction == 1) then save the window
-        if prediction == 1:
-            on_windows.append(window)
+        # if prediction[0][1] > 0.8:
+        if decision > 0.8:
+                on_windows.append(window)
         else:
             n_miss += 1
     # 8) Return windows for positive detections
@@ -252,8 +233,6 @@ def search_windows(img, windows, clf, scaler, color_space='YCrCb',
 def get_file_paths():
     cars = np.array(glob.glob('train_data/vehicle/*/*.png'))
     notcars = np.array(glob.glob('train_data/nonvehicle/*/*.png'))
-    # cars = np.array(glob.glob('small_train_data/vehicle/*.png'))
-    # notcars = np.array(glob.glob('small_train_data/nonvehicle/*.png'))
 
     print("File paths: Cars = ", len(cars), ", Non-Cars = ", len(notcars))
 
@@ -269,7 +248,6 @@ def extract_features_from_paths(image_paths):
     ret = []
     cnt = 0
     for image_path in image_paths:
-        # print("\rExtracting feature", cnt," of", len(image_paths))
         sys.stdout.write("\rExtracting feature: " +  str(cnt) + "/" + str(len(image_paths)))
         sys.stdout.flush()
         cnt += 1
@@ -301,11 +279,6 @@ def train_model():
     not_car_features = load_features("not_car_features")
     print("Loaded features: Car = ", str(len(car_features)), ", Non-Car: ", str(len(not_car_features)))
 
-    # samples = min(len(car_features), len(not_car_features))
-    #
-    # car_features = car_features[:samples]
-    # not_car_features = not_car_features[:samples]
-
     X = np.vstack((car_features, not_car_features)).astype(np.float64)
     Y  = np.hstack((np.ones(len(car_features)), np.zeros(len(not_car_features))))
 
@@ -318,7 +291,7 @@ def train_model():
     X_train, X_test, y_train, y_test = train_test_split(scaled_X, Y,  test_size=0.2, random_state=r)
 
     print("Now training model...")
-    svc = LinearSVC(C = 0.08, penalty = 'l2', loss = "hinge")
+    svc = LinearSVC(C = 1000)
     t = time.time()
     svc.fit(X_train, y_train)
     te = time.time()
@@ -346,30 +319,64 @@ def regenerate_features():
     store_features(features_cars, "car_features")
     store_features(features_not_cars, "not_car_features")
 
+
+def add_heat(heatmap, bbox_list):
+    # Iterate through list of bboxes
+    for box in bbox_list:
+        # Add += 1 for all pixels inside each bbox
+        # Assuming each "box" takes the form ((x1, y1), (x2, y2))
+        heatmap[box[0][1]:box[1][1], box[0][0]:box[1][0]] += 1
+
+    # Return updated heatmap
+    return heatmap
+
+
+def apply_threshold(heatmap, threshold):
+    # Zero out pixels below the threshold
+    heatmap[heatmap <= threshold] = 0
+    # Return thresholded map
+    return heatmap
+
+
+def draw_labeled_bboxes(img, labels):
+    # Iterate through all detected cars
+    rects = []
+    for car_number in range(1, labels[1] + 1):
+        # Find pixels with each car_number label value
+        nonzero = (labels[0] == car_number).nonzero()
+        # Identify x and y values of those pixels
+        nonzeroy = np.array(nonzero[0])
+        nonzerox = np.array(nonzero[1])
+        # Define a bounding box based on min/max x and y
+        bbox = ((np.min(nonzerox), np.min(nonzeroy)), (np.max(nonzerox), np.max(nonzeroy)))
+        rects.append(bbox)
+        # Draw the box on the image
+        cv2.rectangle(img, bbox[0], bbox[1], (0, 0, 255), 6)
+    # Return the image and final rectangles
+    return img, rects
+
+
 prev_windows = []
-def demo_search_window(imgpath=None, img=None, svc=None, scaler=None, average=False, config=None):
+def detect_cars(imgpath=None, img=None, svc=None, scaler=None, average=False, config=None):
     global prev_windows
 
     if img is None:
         vehicle_img = cv2.imread(imgpath)
         vehicle_img = cv2.cvtColor(vehicle_img, cv2.COLOR_BGR2RGB)
-        # vehicle_img = vehicle_img.astype(np.float32) / 255
     else:
         vehicle_img = img
 
     output_img = np.copy(vehicle_img)
 
     sets = [
-        [[410,602], (64,64), (255, 255, 0), (0.5,0.5)],
-        [[547, 675], (128,128), (255,0,255), (0.5,0.5)]
-        # [[475, 675], (200,200), (0,255,0), (0.75,0.75)]
+        [[390, 500], (64,64), (255, 255, 0), (0.75,0.75)],
+        [[390, 600], (128,128), (255,0,255), (0.5,0.5)]
+        # [[390, 700], (200,200), (0,255,0), (0.75,0.75)]
     ]
 
     windows = []
     for s in sets:
-        # windows = slide_window(img, y_start_stop=[400, 528], xy_window=(64,64))
-        # windows.extend(slide_window(img, y_start_stop=[400, 656], xy_window=(128,128)))
-        windows.extend(slide_window(vehicle_img, y_start_stop=s[0], xy_window=s[1], xy_overlap=s[3]))
+        windows.extend(slide_window(vehicle_img, x_start_stop=[400, 1280], y_start_stop=s[0], xy_window=s[1], xy_overlap=s[3]))
 
     hot_windows = search_windows(img=vehicle_img, windows= windows, clf=svc, scaler=scaler, color_space = config["color_space"],
                                  spatial_size = config["spatial_size"], hist_bins = config["hist_bins"], orient = config["orient"],
@@ -377,105 +384,26 @@ def demo_search_window(imgpath=None, img=None, svc=None, scaler=None, average=Fa
                                  hog_channel = config["hog_channel"], spatial_feat = config["spatial_feat"],
                                  hist_feat = config["hist_feat"], hog_feat = config["hog_feat"])
 
-    def add_heat(heatmap, bbox_list):
-        # Iterate through list of bboxes
-        for box in bbox_list:
-            # Add += 1 for all pixels inside each bbox
-            # Assuming each "box" takes the form ((x1, y1), (x2, y2))
-            heatmap[box[0][1]:box[1][1], box[0][0]:box[1][0]] += 1
-
-        # Return updated heatmap
-        return heatmap
-
-    prev_windows.append(hot_windows)
-    prev_windows = prev_windows[-30:]
-    heatmap_img = np.zeros_like(vehicle_img[:, :, 0])
 
     if average:
-        for pv in prev_windows:
-            heatmap_img = add_heat(heatmap_img, pv)
+        prev_windows.append(hot_windows)
+        prev_windows = prev_windows[-30:]
+        heatmap_img = np.zeros_like(vehicle_img[:, :, 0])
+
+        if average:
+            for pv in prev_windows:
+                heatmap_img = add_heat(heatmap_img, pv)
+        else:
+            heatmap_img = add_heat(heatmap_img, hot_windows)
+
+
+        heatmap_img = apply_threshold(heatmap_img, 7)
+        labels = label(heatmap_img)
+
+        i, r = draw_labeled_bboxes(output_img, labels)
+        return i
     else:
-        heatmap_img = add_heat(heatmap_img, hot_windows)
-
-
-    def apply_threshold(heatmap, threshold):
-        # Zero out pixels below the threshold
-        heatmap[heatmap <= threshold] = 0
-        # Return thresholded map
-        return heatmap
-
-    heatmap_img = apply_threshold(heatmap_img, 6)
-    labels = label(heatmap_img)
-
-    def draw_labeled_bboxes(img, labels):
-        # Iterate through all detected cars
-        rects = []
-        for car_number in range(1, labels[1] + 1):
-            # Find pixels with each car_number label value
-            nonzero = (labels[0] == car_number).nonzero()
-            # Identify x and y values of those pixels
-            nonzeroy = np.array(nonzero[0])
-            nonzerox = np.array(nonzero[1])
-            # Define a bounding box based on min/max x and y
-            bbox = ((np.min(nonzerox), np.min(nonzeroy)), (np.max(nonzerox), np.max(nonzeroy)))
-            rects.append(bbox)
-            # Draw the box on the image
-            cv2.rectangle(img, bbox[0], bbox[1], (0, 0, 255), 6)
-        # Return the image and final rectangles
-        return img, rects
-
-    i, r = draw_labeled_bboxes(output_img, labels)
-    # return draw_boxes(output_img, hot_windows)
-    return i
-
-def demo_detection_image(svc, scaler, config):
-    # img = demo_search_window(svc, scaler)
-    # plt.imshow(img)
-    # plt.show()
-    # cv2.waitKey(2000)
-
-    f, (ax1,ax2,ax3) = plt.subplots(3, 2, figsize=(24, 9))
-    f.tight_layout()
-    ax1[0].imshow(demo_search_window(imgpath="test_images/test1.jpg", svc=svc, scaler=scaler, config=config), cmap="gray")
-    ax1[1].imshow(demo_search_window(imgpath="test_images/test2.jpg", svc=svc, scaler=scaler, config=config), cmap="gray")
-    ax2[0].imshow(demo_search_window(imgpath="test_images/test3.jpg", svc=svc, scaler=scaler, config=config), cmap="gray")
-    ax2[1].imshow(demo_search_window(imgpath="test_images/test4.jpg", svc=svc, scaler=scaler, config=config), cmap="gray")
-    ax3[0].imshow(demo_search_window(imgpath="test_images/test5.jpg", svc=svc, scaler=scaler, config=config), cmap="gray")
-    ax3[1].imshow(demo_search_window(imgpath="test_images/test6.jpg", svc=svc, scaler=scaler, config=config), cmap="gray")
-    plt.show()
-
-    cv2.waitKey(1000)
-
-def demo_draw_window(imgpath): #y_start_stop, xy_size=(64,64), color=(255,255,0)):
-    image = mpimg.imread(imgpath)
-
-    sets = [
-        [[400,528], (64,64), (255, 255, 0), (0.5,0.5)],
-        [[400, 675], (128,128), (255,0,255), (0.5,0.5)]
-        # [[400, 675], (200,200), (0,255,0), (0.75,0.75)]
-    ]
-
-    winn = 0
-    for s in sets:
-        windows = slide_window(image, y_start_stop=s[0], xy_window=s[1], xy_overlap=s[3])
-        image = draw_boxes(image, windows, color=s[2])
-        winn += len(windows)
-    print("Count = ", winn)
-
-    return image
-
-def demo_sliding_window():
-    f, (ax1, ax2, ax3) = plt.subplots(3, 2, figsize=(24, 9))
-    f.tight_layout()
-    ax1[0].imshow(demo_draw_window("test_images/test1.jpg"), cmap="hot")
-    ax1[1].imshow(demo_draw_window("test_images/test2.jpg"), cmap="hot")
-    ax2[0].imshow(demo_draw_window("test_images/test3.jpg"), cmap="hot")
-    ax2[1].imshow(demo_draw_window("test_images/test4.jpg"), cmap="hot")
-    ax3[0].imshow(demo_draw_window("test_images/test5.jpg"), cmap="hot")
-    ax3[1].imshow(demo_draw_window("test_images/test6.jpg"), cmap="hot")
-    plt.show()
-
-    cv2.waitKey(1000)
+        return draw_boxes(output_img, hot_windows)
 
 
 def run_train_model():
@@ -488,10 +416,19 @@ def run_demo_image_detection():
     model, scaler = load_model()
     demo_detection_image(model, scaler, config)
 
-def process_image(img):
-    return demo_search_window(img=img, svc=model, scaler=scaler, average=True, config=config)
 
-def output_video(src="project_video.mp4", dst = "test_videos_output/VIDEO1.mp4", start=None, stop=None):
+def process_image_save_frames(img):
+    return process_image(img, True)
+
+
+def process_image(img, save_frames=False):
+    if save_frames:
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        cv2.imwrite("frames/frame" + str(int(round(time.time() * 1000))) + ".jpg", rgb)
+
+    return detect_cars(img=img, svc=model, scaler=scaler, average=True, config=config)
+
+def output_video(src="test_video.mp4", dst = "test_videos_output/VIDEO2.mp4", start=None, stop=None, save_frames=False):
     if start is not None and stop is not None:
         clip1 = VideoFileClip(src).subclip(start,stop)
     else:
@@ -501,8 +438,15 @@ def output_video(src="project_video.mp4", dst = "test_videos_output/VIDEO1.mp4",
     white_clip.write_videofile(dst, audio=False)
 
 
-model, scaler = load_model()
-output_video(start=12, stop=14)
+def run_pipeline():
+    output_video() #start=38, stop=42, save_frames=True)
 
+model, scaler = load_model()
+run_pipeline()
 # run_train_model()
+# demo_cars_not_cars()
+# demo_hog()
+# demo_sliding_window()
+# demo_detection_image(model, scaler, config)
 # run_demo_image_detection()
+# demo_heat()
